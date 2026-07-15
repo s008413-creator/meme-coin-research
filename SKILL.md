@@ -32,11 +32,13 @@ triggers:
 | 工具 | 安装方式 | 验证 |
 |------|---------|------|
 | `gmgn-cli` | `npm install -g gmgn-cli` | `gmgn-cli --version` |
-| `twitter-cli` | 随 Agent-Reach 或独立安装 | `twitter-cli --version` |
+| `twitter` | 通过 Agent-Reach：`pipx install twitter-cli`（**包名**是 `twitter-cli`，但**命令名**是 `twitter`） | `twitter --version` |
 
 以及以下辅助工具（通常系统自带或 Agent 环境已有）：
 - `curl` — HTTP 请求（读网页/推文）
 - 搜索引擎/Exa — 全网搜索（Agent 环境通常内置）
+
+> ⚠️ **命令名陷阱**：Agent-Reach 的 Twitter 工具 `pipx install` 的包叫 `twitter-cli`，但注册出来的可执行命令是 `twitter`（不是 `twitter-cli`）。本文件所有示例统一用 `twitter`。
 
 ---
 
@@ -58,6 +60,17 @@ meme coin 价值 = 叙事驱动的注意力定价
 ### 第 1 轮：并行数据采集
 
 **同时**执行以下查询。注意所有命令在 shell 中执行，解析 JSON/文本输出提取所需字段。
+
+> **链识别（先确认 `--chain` 参数）**：`gmgn-cli` 的 `--chain` 取值为 `sol` / `bsc` / `base` / `robinhood`。
+> - **用户已明确指定链**：直接用用户指定的链（例如用户说"这是 robinhood 链的"→ 立刻用 `robinhood`）。**绝不要覆盖用户的指定**，也不要另起炉灶去试别的链。
+> - **Solana**：CA 为 base58 编码，约 44 字符，不含 `0x` → 用 `sol`。
+> - **0x 开头的地址**：可能是 **BSC / Base / Robinhood 三者之一**——它们的代币地址都是 `0x` + 40 位十六进制格式（**牢记：0x ≠ 仅 BSC/Base**）。判定顺序：
+>   1. 若用户或来源（DexScreener 等）标注了具体网络 → 直接用该网络。
+>   2. 若无法判定 → **依次试 `robinhood` → `bsc` → `base`**。（gmgn 对 robinhood 的支持常被忽略，但它是 0x 地址且 gmgn 原生支持，**必须优先探测**；命中标志：`token info` 返回了 `symbol`/`name` 等真实字段。）
+> - **Ethereum 主网 / Arbitrum / Avalanche / Optimism / Polygon 等**：`gmgn-cli` **不支持**。不要做 RPC 探测、不要查 Etherscan、不要做多链扫描——既无解又浪费时间。这些链上的 meme 不在本 skill 覆盖范围内。
+> - **判定成功的唯一标准**：`gmgn-cli token info` 返回了 `symbol`/`name`/`price` 等真实字段即命中；返回空或报错则换下一链重试。
+>
+> 下文命令中的 `--chain sol` 仅为示例，务必按实际 CA 替换为对应链。
 
 #### ① 代币信息（gmgn-cli）
 
@@ -102,14 +115,14 @@ gmgn-cli portfolio created-tokens --chain sol --wallet <DEV_WALLET>
 ```
 例: "0xScimpy/status/2053306587721252940"
 → 提取末尾数字作为 tweet_id
-→ 执行: twitter-cli tweet <tweet_id>
+→ 执行: twitter tweet <tweet_id>
 → 获取：推文正文、作者粉丝数、likes/RTs/replies/views、评论区内容
 ```
 
 **情况②：twitter_username 是正常用户名**
 ```
 例: "ScamAltmanCoin"
-→ 执行: twitter-cli user <username>
+→ 执行: twitter user <username>
 → 获取：账号创建时间、粉丝数、最近推文列表
 ```
 
@@ -129,13 +142,55 @@ gmgn-cli portfolio created-tokens --chain sol --wallet <DEV_WALLET>
 
 > ⚠️ link 字段是叙事的钥匙。跳过一个字段就可能 miss 一个 20x。
 
+#### 聪明钱 / KOL 链上取证（第 1 轮补充）
+
+> **链支持**：仅 `sol` / `bsc` / `base` / `eth` 支持；`robinhood` 链 gmgn 不提供 track 接口 → 跳过本步，在报告标注"链不支持，聪明钱/KOL 链上取证缺失"。
+> **拿地址的正确姿势**：`token info` 的 `holders` 数组**恒为空**、`wallet_tags_stat` 只给数量，**不能从中提取钱包地址**。必须拉 `track` 交易流，反查 `base_address == <CA>` 的 `maker` 钱包。
+
+**曾经持仓（历史交易）**——拉该链最近的聪明钱 / KOL 交易流，筛出涉及本 CA 的记录：
+
+```bash
+# 聪明钱交易流 → 筛 base_address == <CA>
+gmgn-cli track smartmoney --chain <chain> --limit 200 --raw | python3 -c "
+import sys,json
+ca='<CA>'.lower()
+for r in json.load(sys.stdin).get('list',[]):
+    if str(r.get('base_address','')).lower()==ca:
+        print('SM', r.get('maker'), r.get('side'), 'usd=%.0f'%r.get('amount_usd',0), 't=%d'%r.get('timestamp',0), 'close=%s'%r.get('is_open_or_close'))
+"
+# KOL 交易流 → 同上筛选（把 smartmoney 换成 kol）
+gmgn-cli track kol --chain <chain> --limit 200 --raw | python3 -c "
+import sys,json
+ca='<CA>'.lower()
+for r in json.load(sys.stdin).get('list',[]):
+    if str(r.get('base_address','')).lower()==ca:
+        print('KOL', r.get('maker'), r.get('side'), 'usd=%.0f'%r.get('amount_usd',0), 't=%d'%r.get('timestamp',0), 'close=%s'%r.get('is_open_or_close'))
+"
+```
+
+提取：哪些聪明钱 / KOL 钱包交易过本币、买卖方向（buy/sell）、金额、时间、是否平仓（`is_open_or_close`=1 表示平仓）。
+
+**当前持仓**——对上面出现的关键钱包（尤其买入且未平仓的），查其在本币上的当前余额：
+
+```bash
+gmgn-cli portfolio token-balance --chain <chain> --wallet <WALLET_ADDR> --token <CA>
+```
+
+返回该钱包当前持有本币的数量 / 价值；空值或 0 表示已清仓（`robinhood` 链此处 `--chain` 可照常使用）。
+
+**分析要点**：
+- 聪明钱 / KOL 是**建仓加仓**（真看涨背书）还是**清仓跑路**（看跌信号）？
+- 建仓成本区间、当前盈亏——亏损硬扛 vs 盈利落袋，含义相反
+- **社交喊单 vs 链上背离**：KOL 在 Twitter 喊单但链上钱包零持仓 → 纯嘴炮无真金白银，可信度打折（呼应 caller 互割信号）
+- 多少比例的聪明钱钱包"用脚投票"离场 = 撤退强度
+
 ### 第 2 轮：传播链深度分析
 
 #### ④ Twitter 搜索
 
 ```bash
-twitter-cli search "<TOKEN_NAME>" 
-twitter-cli search "$<TICKER>"
+twitter search "<TOKEN_NAME>"
+twitter search "$<TICKER>"
 ```
 
 从搜索结果中分析并回答：
@@ -171,18 +226,34 @@ twitter-cli search "$<TICKER>"
 
 ## 分析框架
 
-### 一、安全一票否决
+### 一、安全检查（分两级，勿混淆）
 
-逐条检查。**任一命中 → 标记"安全不通过"，只输出安全检查章节，不输出后续章节**：
+> ⚠️ **链差异必读**：
+> - **Solana 链**：检查 Mint Authority / Freeze Authority 是否 revoke。
+> - **EVM 链（BSC / Base / Robinhood）**：**不存在 Mint/Freeze Authority 概念**，这两项为 `N/A`（非失败、非通过，直接标 N/A）。EVM 改查：合约 Owner 是否 renounce、是否仍可 mint、是否 honeypot、税率是否可改。
+> - **Dev 持仓低是正向信号**：`dev_hold_rate` < 5% 表示 Dev 几乎不持币、砸盘风险低，**不是安全检查失败项**；仅当 > 10% 或未锁定且集中时才计入风险。
 
+逐条检查，分两级处理：
+
+**🔴 硬否决（任一命中 → 标记"安全不通过"，只输出安全检查章节，不输出后续）**：
 ```
-☐ 1. LP 未锁定/未销毁 — pump.fun 毕业币自动满足，非 pump.fun 必须手动检查
-☐ 2. Mint Authority 未 revoke — 一票否决，无例外
-☐ 3. Freeze Authority 未 revoke — 一票否决，无例外
-☐ 4. 有未披露的 Transfer Fee 修改权限 — Dev 可随时改成 99% 税率
-☐ 5. 前 3 地址（排除CEX/DEX/销毁）持仓 > 30% 且未锁定
-☐ 6. Dev 在创建后 24h 内卖出 > 初始持仓 10%
+☐ H1. Honeypot 检测命中（买得进卖不出）— 无例外
+☐ H2. [Solana] Mint Authority 未 revoke — 无例外
+☐ H3. [Solana] Freeze Authority 未 revoke — 无例外
+☐ H4. [EVM] 合约 Owner 仍可 mint / 未 renounce 且保留铸币函数 — 无例外
+☐ H5. 有未披露的 Transfer Fee 修改权限（Dev 可随时改成 99% 税率）— 无例外
+☐ H6. 前 3 地址（排除CEX/DEX/销毁）持仓 > 30% 且未锁定 — 无例外
+☐ H7. Dev 在创建后 24h 内卖出 > 初始持仓 10%
 ```
+
+**🟡 软警告（命中 → 继续完整分析，但在安全检查章节标红 + 态势判断中提示风险）**：
+```
+☐ S1. LP 未锁定/未销毁 — 常见但需提示（Dev 可撤池 Rug）
+☐ S2. Dev 持仓偏高（> 10%）或集中未锁定
+☐ S3. 税率 > 5% 或未明确
+```
+
+> **只有 H1–H7 任一命中才"只输出安全章节"**；S1–S3 命中不阻断后续分析。
 
 ### 二、叙事分类与判断
 
@@ -195,7 +266,7 @@ twitter-cli search "$<TICKER>"
 - 名字与事件的关联直觉明显吗？
 - 对标：同类事件之前的 meme 跑到多少 MC？
 
-**B. 事件驱动 ��� 预期炒作**
+**B. 事件驱动 — 预期炒作**
 - 事件发生的确定性？会不会取消？
 - 距离事件还有多久？1-2周最佳
 - 全球关注度？
@@ -286,7 +357,12 @@ twitter-cli search "$<TICKER>"
 
 ---
 
-## 输出格式（固定，不可增减章节）
+## 输出格式（⚠️ 强制执行，不可简化、不可替代）
+
+> **绝对禁止**输出口语化摘要、对话式总结、要点列表等非模板格式。
+> 无论分析过程多复杂、数据多或少，最终输出**必须且只能**是以下 Markdown 研报模板。
+> 不允许省略任何章节（安全不通过时除外），不允许用"以下是简要结论"代替完整报告。
+> 模板中的 `{占位符}` 替换为实际数据，`数据不足` 标注缺失项，绝不编造。
 
 ```markdown
 # $TICKER 投研报告
@@ -296,16 +372,27 @@ twitter-cli search "$<TICKER>"
 
 ## 🔒 安全检查
 
+> EVM 链（BSC/Base/Robinhood）：Mint/Freeze Authority 标记为 `N/A`（概念不适用）。
+> Dev 持仓低（<5%）为 🟢 正向，不计入失败。
+
+**🔴 硬否决项**：
+| 检查项 | 状态 |
+|--------|------|
+| Honeypot 检测 | ✅/❌ |
+| [Sol] Mint 权限放弃 / [EVM] 合约可 mint | ✅/❌/N/A |
+| [Sol] Freeze 权限放弃 / [EVM] 可 pause | ✅/❌/N/A |
+| 税率可修改 | ✅/❌ |
+| Top3 持仓集中（>30% 未锁定） | ✅/❌ |
+| Dev 早期卖出（>10%） | ✅/❌ |
+
+**🟡 软警告项**：
 | 检查项 | 状态 |
 |--------|------|
 | LP 锁定/销毁 | ✅/❌ |
-| Mint 权限放弃 | ✅/❌ |
-| Freeze 权限放弃 | ✅/❌ |
-| 税率可修改 | ✅/❌ |
-| Top3 持仓集中 | ✅/❌ |
-| Dev 早期卖出 | ✅/❌ |
+| Dev 持仓偏高（>10%） | ✅/❌ |
+| 税率偏高（>5%） | ✅/❌ |
 
-**结论**：✅ 通过 / ❌ 一票否决（{具体原因}）
+**结论**：✅ 通过 / 🟡 有软警告（继续分析） / ❌ 硬否决（{具体原因}，仅输出本章节）
 
 ---
 
@@ -361,13 +448,31 @@ twitter-cli search "$<TICKER>"
 
 ---
 
+## 💡 聪明钱 / KOL 链上取证
+
+> 若链不支持（robinhood）或 track 流中无本币记录，标注"数据不足"，不编造。
+
+**曾经持仓（历史交易）**：
+| 钱包 | 类型 | 方向 | 金额 | 时间 | 平仓 |
+|------|------|------|------|------|------|
+| {addr} | 聪明钱/KOL | buy/sell | {$} | {相对时间} | 是/否 |
+
+**当前持仓**：
+| 钱包 | 类型 | 当前持仓 | 占本币比 | 盈亏 |
+|------|------|---------|---------|------|
+| {addr} | 聪明钱/KOL | {数量/$} | {%} | {盈/亏/%} |
+
+**结论**：{建仓加仓看涨 / 清仓跑路看跌 / 社交喊单但链上零持仓（嘴炮） / 数据不足}
+
+---
+
 ## 🔗 叙事→资金验证
 
 | 信号 | 状态 |
 |------|------|
 | 新地址净买入 | ✅/❌ |
 | 持币时间增长 | ✅/❌ |
-| 聪明钱叙事后入场 | ✅/❌ |
+| 聪明钱/KOL 链上取证印证（建仓/清仓） | ✅/❌ |
 | 喊单≠交易背离 | ✅/❌ |
 | 热度≠holder背离 | ✅/❌ |
 
@@ -422,9 +527,9 @@ twitter-cli search "$<TICKER>"
 本 skill 是一个纯 Markdown 文件，放入 Agent 的 skills 目录即可：
 
 ```bash
-# CodeBuddy
-mkdir -p ~/.codebuddy/skills/meme-coin-research
-cp SKILL.md ~/.codebuddy/skills/meme-coin-research/
+# WorkBuddy（本机）
+mkdir -p ~/.workbuddy/skills/meme-coin-research
+cp SKILL.md ~/.workbuddy/skills/meme-coin-research/
 
 # Hermes
 mkdir -p ~/.hermes/skills/meme-coin-research
@@ -435,11 +540,25 @@ cp SKILL.md ~/.hermes/skills/meme-coin-research/
 
 前置工具：
 ```bash
-npm install -g gmgn-cli        # 链上数据
-npm install -g twitter-cli      # Twitter 查询（或通过 Agent-Reach 安装）
+npm install -g gmgn-cli        # 链上数据（已装则跳过）
+pipx install twitter-cli        # Twitter 查询（Agent-Reach）；包名 twitter-cli，命令名 twitter
 ```
 
-GMGN 还需要设置 API Key：
+GMGN API Key 配置：
 ```bash
-export GMGN_API_KEY=<your_key>
+# 无需手动 export。gmgn-cli 会自动读取 ~/.config/gmgn/.env 中的 GMGN_API_KEY。
+# 该 .env 可能同时含 GMGN_PRIVATE_KEY（交易私钥）。研究用途不需要私钥。
+# ⚠️ 切勿将 .env（或任何含私钥的内容）提交到公开仓库。建议在仓库根目录加 .gitignore：
+#     .env
+#     .env.*
+#     *.env
+#     *.pem
+#     *.key
+# 并用 .env.example 占位（全为假值）替代真实密钥。
+```
+
+GMGN API Key 如果尚未配置，去 GMGN 官网获取后写入：
+```bash
+mkdir -p ~/.config/gmgn
+printf 'GMGN_API_KEY=your_api_key_here\n# 研究用途请勿填入真实私钥\nGMGN_PRIVATE_KEY=\n' > ~/.config/gmgn/.env
 ```
